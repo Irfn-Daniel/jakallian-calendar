@@ -398,6 +398,10 @@
     }
 
     // ----------------- WLC-style calendar -----------------
+    function dateToJD(date) {
+      return date.getTime() / 86400000 + 2440587.5;
+    }
+
     class WlcCalendar {
       constructor(lat, lon) {
         this.lat = lat;
@@ -408,12 +412,41 @@
         this._yearStartCache = {};
       }
 
+       // Compute the lunation number k for the conjunction closest to mid-month
+      computeKForYearMonth(year, month) {
+        const targetDate = new Date(year, month - 1, 15, 12, 0, 0);
+        const jd = dateToJD(targetDate);
+        return Math.round((jd - 2451550.1) / 29.530588853);
+      }
+
+      // Compute the exact conjunction time for a given lunation number k
+      conjunctionDateByK(k) {
+        if (typeof moonphase.truePhase === 'function') {
+          try {
+            const jde = moonphase.truePhase(k);
+            if (typeof jde === 'number' && isFinite(jde)) return jdeToDate(jde);
+          } catch (e) {
+            console.warn('truePhase failed, using fallback:', e.message);
+          }
+        }
+        // Fallback: approximate decimal year from k
+        const yearApprox = 2000 + k / 12.3685;
+        return jdeToDate(moonphase.newMoon(yearApprox));
+      }
+
+      // conjunctionDate(year, month) {
+      //   while (month < 1)  { month += 12; year -= 1; }
+      //   while (month > 12) { month -= 12; year += 1; }
+      //   const decimalYear = year + (month - 1) / 12;
+      //   const jde = moonphase.newMoon(decimalYear);
+      //   return jdeToDate(jde);
+      // }
+
       conjunctionDate(year, month) {
         while (month < 1)  { month += 12; year -= 1; }
         while (month > 12) { month -= 12; year += 1; }
-        const decimalYear = year + (month - 1) / 12;
-        const jde = moonphase.newMoon(decimalYear);
-        return jdeToDate(jde);
+        const k = this.computeKForYearMonth(year, month);
+        return this.conjunctionDateByK(k);
       }
 
       getVernalEquinox(year) {
@@ -426,15 +459,32 @@
         }
       }
 
-      getYearStart(gregorianYear) {
+      // getYearStart(gregorianYear) {
+      //   if (this._yearStartCache[gregorianYear]) return this._yearStartCache[gregorianYear];
+      //   const eqTime = this.getVernalEquinox(gregorianYear).getTime();
+      //   let best = null, bestDiff = Infinity;
+      //   for (let m = 1; m <= 5; m++) {
+      //     const conj = this.conjunctionDate(gregorianYear, m);
+      //     const diff = Math.abs(conj.getTime() - eqTime);
+      //     if (diff < bestDiff) { bestDiff = diff; best = this.getNewMoonDay(conj); }
+      //   }
+      //   this._yearStartCache[gregorianYear] = best;
+      //   return best;
+      // }
+
+       getYearStart(gregorianYear) {
         if (this._yearStartCache[gregorianYear]) return this._yearStartCache[gregorianYear];
         const eqTime = this.getVernalEquinox(gregorianYear).getTime();
         let best = null, bestDiff = Infinity;
-        for (let m = 1; m <= 5; m++) {
-          const conj = this.conjunctionDate(gregorianYear, m);
+
+        // Search ±3 lunations around March; one of them is the closest to equinox
+        const baseK = this.computeKForYearMonth(gregorianYear, 3);
+        for (let dk = -3; dk <= 3; dk++) {
+          const conj = this.conjunctionDateByK(baseK + dk);
           const diff = Math.abs(conj.getTime() - eqTime);
           if (diff < bestDiff) { bestDiff = diff; best = this.getNewMoonDay(conj); }
         }
+
         this._yearStartCache[gregorianYear] = best;
         return best;
       }
@@ -483,15 +533,39 @@
         return cells;
       }
 
+      // getMonthByIndex(idx) {
+      //   if (this._monthCache[idx]) return this._monthCache[idx];
+      //   const total = this.epochYear * 12 + idx;
+      //   const year  = Math.floor(total / 12);
+      //   const month = (total % 12) + 1;
+      //   const startNMD = this.getNewMoonDay(this.conjunctionDate(year, month));
+      //   const endNMD   = this.getNewMoonDay(this.conjunctionDate(year, month + 1));
+      //   const result = {
+      //     year, month, startNMD, endNMD,
+      //     cells: this.generateMonth(startNMD, endNMD)
+      //   };
+      //   this._monthCache[idx] = result;
+      //   return result;
+      // }
+
       getMonthByIndex(idx) {
         if (this._monthCache[idx]) return this._monthCache[idx];
         const total = this.epochYear * 12 + idx;
         const year  = Math.floor(total / 12);
         const month = (total % 12) + 1;
-        const startNMD = this.getNewMoonDay(this.conjunctionDate(year, month));
-        const endNMD   = this.getNewMoonDay(this.conjunctionDate(year, month + 1));
+
+        // Determine k, preferring neighbor consistency so consecutive idx
+        // always produces consecutive lunations (no 59-day "months").
+        let k;
+        if (this._monthCache[idx - 1])      k = this._monthCache[idx - 1].k + 1;
+        else if (this._monthCache[idx + 1]) k = this._monthCache[idx + 1].k - 1;
+        else                                k = this.computeKForYearMonth(year, month);
+
+        const startNMD = this.getNewMoonDay(this.conjunctionDateByK(k));
+        const endNMD   = this.getNewMoonDay(this.conjunctionDateByK(k + 1));
+
         const result = {
-          year, month, startNMD, endNMD,
+          year, month, k, startNMD, endNMD,
           cells: this.generateMonth(startNMD, endNMD)
         };
         this._monthCache[idx] = result;
